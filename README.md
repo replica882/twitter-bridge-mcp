@@ -73,7 +73,7 @@ Log in to Twitter/X in this Chrome window.
 ### 2. Install & configure
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/replica882/twitter-bridge-mcp.git
 cd twitter-bridge-mcp
 npm install
 
