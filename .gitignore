@@ -3,3 +3,4 @@ node_modules/
 *.bak
 *.old
 *.log
+.tokens.json

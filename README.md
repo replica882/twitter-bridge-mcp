@@ -29,12 +29,24 @@ Claude.ai ──MCP──▶ your-server:8080 ──bb-browser──▶ Chrome (
 | `twitter_notifications` | bb-sites adapter | ✅ |
 | `twitter_user` | bb-sites adapter | ✅ |
 | `twitter_view_tweet` | Browser DOM parsing | ✅ |
+| `twitter_mentions` | Browser DOM parsing | ✅ |
+| `twitter_my_replies` | Browser DOM parsing | ✅ |
 | `twitter_dm_read` | Browser automation | ⚠️ partial |
 | `twitter_screenshot` | bb-browser | ✅ |
 | `browser_open` | bb-browser | ✅ |
 | `browser_snapshot` | bb-browser | ✅ |
 
 > DM reading works but Twitter's E2E encryption may limit what's visible via browser automation.
+
+
+## What's new in v0.6.1
+
+- **`twitter_view_tweet` now includes replies** — Pass `include_replies: true` (default) to fetch up to 20 replies from the tweet's thread. Uses `cellInnerDiv` container traversal with auto-scrolling.
+- **New: `twitter_mentions`** — Fetches tweets that mention/reply to you from the Mentions tab.
+- **New: `twitter_my_replies`** — Fetches your own replies to other tweets. Requires `screen_name` parameter.
+- **Token persistence** — OAuth tokens are now saved to `.tokens.json` and survive server restarts. No more re-authenticating after every reboot.
+- **Tab switching fix** — Fixed a bug where `bb-browser open` creates a new tab without switching to it, causing all subsequent operations to run on the wrong page. Affects `view_tweet`, `openAndParseTweets` (used by timeline, search, bookmarks, tweets, mentions, my_replies).
+- **Smart page loading** — `view_tweet` now polls for the main tweet article to appear (up to 15s) instead of using a fixed sleep, improving reliability on slow connections.
 
 ## Architecture
 
@@ -85,7 +97,7 @@ cp .env.example .env
 
 ```bash
 node server.mjs
-# Twitter MCP Bridge v0.6.0: http://0.0.0.0:8080/mcp
+# Twitter MCP Bridge v0.6.1: http://0.0.0.0:8080/mcp
 ```
 
 ### 4. Expose via Cloudflare Tunnel

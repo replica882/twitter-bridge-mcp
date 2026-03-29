@@ -1,7 +1,7 @@
 {
   "name": "twitter-bridge-mcp",
-  "version": "0.6.0",
-  "description": "Connect Claude.ai to Twitter/X via browser automation — no API key needed",
+  "version": "0.6.1",
+  "description": "Connect Claude.ai to Twitter/X via browser automation \u2014 no API key needed",
   "type": "module",
   "main": "server.mjs",
   "scripts": {
@@ -12,7 +12,14 @@
     "zod": "^3.24.3",
     "dotenv": "^16.4.7"
   },
-  "keywords": ["mcp", "twitter", "claude", "browser-automation"],
+  "keywords": [
+    "mcp",
+    "twitter",
+    "claude",
+    "browser-automation"
+  ],
   "license": "MIT",
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=18"
+  }
 }

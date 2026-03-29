@@ -3,7 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createServer } from "http";
 import { execFileSync } from "child_process";
 import { randomBytes, createHash } from "crypto";
-import { readFileSync } from "fs";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 import { z } from "zod";
 import "dotenv/config";
 
@@ -13,7 +13,7 @@ const BB = process.env.BB_BROWSER_PATH || (process.env.HOME + "/local/bin/bb-bro
 const PORT = parseInt(process.env.PORT || "8080");
 const CDP_PORT = process.env.CDP_PORT || "9222";
 const BASE_URL = process.env.BASE_URL || "http://localhost:8080";
-const VERSION = "0.6.0";
+const VERSION = "0.6.1";
 const DM_PIN = process.env.DM_PIN || "";
 
 if (DM_PIN && !/^\d{4}$/.test(DM_PIN)) {
@@ -26,11 +26,36 @@ var registeredRedirectUris = [];
 const authCodes = new Map();   // code -> { expires, codeChallenge, redirectUri }
 const accessTokens = new Map(); // token -> expiresAt
 
+// === TOKEN PERSISTENCE ===
+
+var TOKEN_FILE = new URL(".tokens.json", import.meta.url).pathname;
+
+function saveTokens() {
+  try {
+    var data = { tokens: Object.fromEntries(accessTokens), codes: Object.fromEntries(authCodes) };
+    writeFileSync(TOKEN_FILE, JSON.stringify(data));
+  } catch(e) { console.error("saveTokens error:", e.message); }
+}
+
+function loadTokens() {
+  try {
+    if (!existsSync(TOKEN_FILE)) return;
+    var raw = readFileSync(TOKEN_FILE, "utf-8");
+    var data = JSON.parse(raw);
+    var now = Date.now();
+    if (data.tokens) { for (var [k,v] of Object.entries(data.tokens)) { if (v > now) accessTokens.set(k, v); } }
+    if (data.codes) { for (var [k,v] of Object.entries(data.codes)) { if (v.expires > now) authCodes.set(k, v); } }
+    console.log("Loaded " + accessTokens.size + " tokens, " + authCodes.size + " codes from disk");
+  } catch(e) { console.error("loadTokens error:", e.message); }
+}
+loadTokens();
+
 // Cleanup expired auth codes and tokens every 60s
 setInterval(function() {
   var now = Date.now();
   for (var [k, v] of authCodes) { if (v.expires < now) authCodes.delete(k); }
   for (var [k, v] of accessTokens) { if (v < now) accessTokens.delete(k); }
+  saveTokens();
 }, 60000);
 
 // === BROWSER HELPERS ===
@@ -74,6 +99,10 @@ function parseTweetsJS(cnt) {
 async function openAndParseTweets(url, count, waitMs) {
   cleanupTabs();
   bbDirect("open", url);
+  // Switch to newly opened tab
+  var tl = bbDirect("tab", "list");
+  var tm = tl.match(/共 (\d+) 个/);
+  if (tm) { bbDirect("tab", String(parseInt(tm[1]) - 1)); }
   await sleep(waitMs || 4000);
   return bbDirect("eval", parseTweetsJS(count || 20));
 }
@@ -254,6 +283,17 @@ function makeServer() {
     return { content: [{ type: "text", text: bbDirect("site", "twitter/notifications", "--count", String(p.count || 20)) }] };
   });
 
+  s.tool("twitter_my_replies", "Get your own replies to other tweets", { screen_name: z.string(), count: z.number().optional() }, async function(p) {
+    var name = p.screen_name.replace(/\W/g, "");
+    var r = await openAndParseTweets("https://x.com/" + name + "/with_replies", p.count || 20, 5000);
+    return { content: [{ type: "text", text: r }] };
+  });
+
+  s.tool("twitter_mentions", "Get mentions and replies to your tweets", { count: z.number().optional() }, async function(p) {
+    var r = await openAndParseTweets("https://x.com/notifications/mentions", p.count || 20, 5000);
+    return { content: [{ type: "text", text: r }] };
+  });
+
   s.tool("twitter_bookmarks", "Get your bookmarks", { count: z.number().optional() }, async function(p) {
     var r = await openAndParseTweets("https://x.com/i/bookmarks", p.count || 20);
     return { content: [{ type: "text", text: r }] };
@@ -275,13 +315,41 @@ function makeServer() {
     return { content: [{ type: "text", text: r }] };
   });
 
-  s.tool("twitter_view_tweet", "View a tweet with full details and image URLs", { tweet_url: z.string() }, async function(p) {
+  s.tool("twitter_view_tweet", "View a tweet with full details and image URLs", { tweet_url: z.string(), include_replies: z.boolean().optional() }, async function(p) {
     if (!isTwitterUrl(p.tweet_url)) return { content: [{ type: "text", text: "Error: invalid Twitter URL" }] };
     cleanupTabs();
     bbDirect("open", p.tweet_url);
-    await sleep(3000);
-    var r = bbDirect("eval", '(function(){ var article=document.querySelector(\'article[data-testid="tweet"]\'); if(!article)return JSON.stringify({error:"not found"}); var user=article.querySelector(\'[data-testid="User-Name"]\'); var text=article.querySelector(\'[data-testid="tweetText"]\'); var time=article.querySelector("time"); var imgs=Array.from(article.querySelectorAll(\'[data-testid="tweetPhoto"] img\')).map(function(x){return x.src}); var video=article.querySelector("video"); var likes=article.querySelector(\'[data-testid="like"]\'); var rts=article.querySelector(\'[data-testid="retweet"]\'); return JSON.stringify({user:user?user.textContent:"",text:text?text.textContent:"",time:time?time.getAttribute("datetime"):"",images:imgs,has_video:!!video,likes:likes?likes.textContent.trim():"0",retweets:rts?rts.textContent.trim():"0"}); })()');
-    return { content: [{ type: "text", text: r }] };
+    // Switch to the newly opened tab
+    var tabList = bbDirect("tab", "list");
+    var tabMatch = tabList.match(/共 (\d+) 个/);
+    if (tabMatch) { bbDirect("tab", String(parseInt(tabMatch[1]) - 1)); }
+    // Wait for main tweet to load (up to 15s)
+    for (var waitI = 0; waitI < 10; waitI++) {
+      var check = bbDirect("eval", '!!document.querySelector(\'article[data-testid="tweet"]\')');
+      if (check.indexOf("true") >= 0) break;
+      await sleep(1500);
+    }
+    await sleep(1000);
+    // Parse main tweet
+    var mainJS = '(function(){ var article=document.querySelector(\'article[data-testid="tweet"]\'); if(!article)return JSON.stringify({error:"not found"}); var user=article.querySelector(\'[data-testid="User-Name"]\'); var text=article.querySelector(\'[data-testid="tweetText"]\'); var time=article.querySelector("time"); var imgs=Array.from(article.querySelectorAll(\'[data-testid="tweetPhoto"] img\')).map(function(x){return x.src}); var video=article.querySelector("video"); var likes=article.querySelector(\'[data-testid="like"]\'); var rts=article.querySelector(\'[data-testid="retweet"]\'); return JSON.stringify({user:user?user.textContent:"",text:text?text.textContent:"",time:time?time.getAttribute("datetime"):"",images:imgs,has_video:!!video,likes:likes?likes.textContent.trim():"0",retweets:rts?rts.textContent.trim():"0"}); })()';
+    var mainTweet = bbDirect("eval", mainJS);
+    // If include_replies, scroll and grab replies
+    if (p.include_replies !== false) {
+      for (var scrollI = 0; scrollI < 5; scrollI++) {
+        bbDirect("eval", "window.scrollBy(0, 1000)");
+        await sleep(1500);
+      }
+      await sleep(2000);
+      var repliesJS = '(function(){ var cells=document.querySelectorAll(\'[data-testid="cellInnerDiv"]\'); var replies=[]; var skippedFirst=false; for(var i=0;i<cells.length&&replies.length<20;i++){ var c=cells[i]; var art=c.querySelector("article"); if(!art)continue; if(!skippedFirst){skippedFirst=true;continue;} var user=art.querySelector(\'[data-testid="User-Name"]\'); var text=art.querySelector(\'[data-testid="tweetText"]\'); var time=art.querySelector("time"); var imgs=Array.from(art.querySelectorAll(\'[data-testid="tweetPhoto"] img\')).map(function(x){return x.src}); var link=art.querySelector(\'a[href*="/status/"]\'); replies.push({user:user?user.textContent:"",text:text?text.textContent:"",time:time?time.getAttribute("datetime"):"",images:imgs,url:link?"https://x.com"+link.getAttribute("href"):""}); } return JSON.stringify(replies); })()';
+      var replies = bbDirect("eval", repliesJS);
+      try {
+        var result = { tweet: JSON.parse(mainTweet), replies: JSON.parse(replies) };
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch(e) {
+        return { content: [{ type: "text", text: JSON.stringify({ tweet: mainTweet, replies_raw: replies, error: "parse error" }) }] };
+      }
+    }
+    return { content: [{ type: "text", text: mainTweet }] };
   });
 
   s.tool("twitter_screenshot", "Screenshot the current Twitter page", {}, async function() {
@@ -407,6 +475,7 @@ var httpServer = createServer(async function(req, res) {
     var redir = new URL(rawRedir);
     var code = randomBytes(32).toString("hex");
     authCodes.set(code, { expires: Date.now() + 300000, codeChallenge: url.searchParams.get("code_challenge"), redirectUri: rawRedir });
+    saveTokens();
     redir.searchParams.set("code", code);
     if (url.searchParams.get("state")) redir.searchParams.set("state", url.searchParams.get("state"));
     res.writeHead(302, { Location: redir.toString() }); res.end(); return;
@@ -433,6 +502,7 @@ var httpServer = createServer(async function(req, res) {
     authCodes.delete(tbody.get("code"));
     var token = randomBytes(48).toString("hex");
     accessTokens.set(token, Date.now() + 86400000);
+    saveTokens();
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ access_token: token, token_type: "Bearer", expires_in: 86400 })); return;
   }
@@ -442,7 +512,7 @@ var httpServer = createServer(async function(req, res) {
     var auth = req.headers["authorization"];
     var tk = auth ? auth.replace("Bearer ", "") : "";
     if (!tk || !accessTokens.has(tk) || accessTokens.get(tk) < Date.now()) {
-      if (tk) accessTokens.delete(tk);
+      if (tk) { accessTokens.delete(tk); saveTokens(); }
       res.writeHead(401, { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" });
       res.end(JSON.stringify({ error: "unauthorized" })); return;
     }
